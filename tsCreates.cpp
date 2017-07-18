@@ -34,7 +34,8 @@ uint32_t Crc32Calculate(uint8_t *buffer, uint32_t size, uint32_t *crc32_table)
 }
 
 tsCreater::tsCreater(std::string name, bool saveToDisk) :m_tsVcounts(0), m_tsAcounts(0), m_saveToDisk(saveToDisk),
-m_name(name), m_started(false), m_firstFrameTime(-1),m_pcrTimes(0), m_audioPts(0), m_fp(nullptr)
+m_name(name), m_started(false), m_firstFrameTime(-1), m_pcrTimes(0), m_audioPts(0), m_fp(nullptr),
+keyFrameWrited(false)
 {
 
 }
@@ -64,7 +65,7 @@ void tsCreater::addTimedPacket(const timedPacket & pkt)
 
 	if (flv_pkt_audio == pkt.packetType)
 	{
-		if (nullptr==m_audioHeader.data)
+		if (nullptr == m_audioHeader.data)
 		{
 			m_audioHeader.size = pkt.data.front().size;
 			m_audioHeader.data = new char[pkt.data.front().size];
@@ -129,7 +130,7 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 	bool addPCR, addDts;
 
 	addDts = flv_pkt_audio == pktType ? false : true;
-	if (m_pcrTimes==0)
+	if (m_pcrTimes == 0)
 	{
 		addPCR = true;
 	}
@@ -137,15 +138,15 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 	{
 		addPCR = false;
 	}
-	if (flv_pkt_video==pktType)
+	if (flv_pkt_video == pktType)
 	{
-		if (m_pcrTimes++==4)
+		if (m_pcrTimes++ == 4)
 		{
 			m_pcrTimes = 0;
 			AddPatPmt();
 		}
 	}
-	
+
 	//addPCR = true;
 	int tsCount, padSize;
 
@@ -161,7 +162,7 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 		/*payload.size = data.size - 1;
 		payload.data = new char[payload.size];
 		memcpy(payload.data, data.data + 1, payload.size);*/
-		if (m_audio_type_id==0x0f)
+		if (m_audio_type_id == 0x0f)
 		{
 			//AAC
 			DataPacket adts;
@@ -172,14 +173,14 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 			memcpy(payload.data + adts.size, data.data + 2, data.size - 2);
 			delete[]adts.data;
 		}
-		else if (m_audio_type_id==0x03)
+		else if (m_audio_type_id == 0x03)
 		{
 			//MP3 MPEG1
 			payload.size = data.size - 1;
 			payload.data = new char[payload.size];
-			memcpy(payload.data, data.data+1, payload.size);
+			memcpy(payload.data, data.data + 1, payload.size);
 		}
-		else if (m_audio_type_id==0x04)
+		else if (m_audio_type_id == 0x04)
 		{
 			//MP3 MPEG2
 			payload.size = data.size - 1;
@@ -195,6 +196,13 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 	}
 	else if (flv_pkt_video == pktType)
 	{
+#if 1
+		if (false == this->videoPayload(data, payload))
+		{
+			return;
+		}
+		payload.size = payload.size;
+#else
 		//视频，第一个字节给类型，然后可能是AVC，可能是4字节大小+数据
 		if (data.data[0] == 0x17 && 0 == data.data[1])
 		{
@@ -235,7 +243,7 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 				else if (7 == nalType || 8 == nalType)
 				{
 					//忽略
-					nalCur += 4 + nalSize;
+					nalCur += nalSize;
 				}
 				//同一时间只有一个有效帧
 				else if (5 == nalType)
@@ -286,11 +294,16 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 
 					memcpy(payload.data + tmp32, data.data + nalCur, nalSize);
 					tmp32 += nalSize;
-
-					break;
+					this->keyFrameWrited = true;
+					nalCur += nalSize;
 				}
 				else
 				{
+					/*if (false==this->keyFrameWrited)
+					{
+						nalCur += nalSize ;
+						continue;
+					}*/
 					payload.size = nalSize + 10;
 					payload.data = new char[payload.size];
 					tmp32 = 0;
@@ -307,10 +320,11 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 					payload.data[tmp32++] = 0x01;
 					memcpy(payload.data + tmp32, data.data + nalCur, nalSize);
 					tmp32 += nalSize;
-					break;
+					nalCur += nalSize;
 				}
 			}
 		}
+#endif
 	}
 
 	getTSCount(payload.size, addPCR, addDts, tsCount, padSize);
@@ -372,24 +386,28 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 		}
 		//!四字节头
 		//PCR、PAD 
-		long long pcr = ((timeMS*(PCR_HZ / 1000)) / 300) % 0x200000000;
+		long long pcr = ((timeMS*(PCR_HZ / 1000)) / 300) % 0x1ffffffff;
+		auto pcrExt = timeMS*(PCR_HZ / 1000);
 		if (addPCR)
 		{
 			int adpLength = 7 + padSize;//包括pad和adapation field length
 			tsBuf[cur++] = adpLength;
 			tsBuf[cur++] = 0x10;//PCR flag
-			tsBuf[cur++] = ((pcr & 0xfe000000) >> 25);
+			/*tsBuf[cur++] = ((pcr & 0xfe000000) >> 25);
 			tsBuf[cur++] = ((pcr & 0x1fe0000) >> 17);
 			tsBuf[cur++] = ((pcr & 0x1fe00) >> 9);
 			tsBuf[cur++] = ((pcr & 0x1fe) >> 1);
 			tsBuf[cur++] = (((pcr & 1) << 7) | 0x7e);
-			tsBuf[cur++] = 0;
-			/*tsBuf[cur++] = 0x00;
-			tsBuf[cur++] = 0x00;
-			tsBuf[cur++] = 0x00;
-			tsBuf[cur++] = 0x00;
-			tsBuf[cur++] = 0x7e;
-			tsBuf[cur++] = 0x00;*/
+			tsBuf[cur++] = 0;*/
+			tsBuf[cur++] = (pcr >> 25) & 0xff;
+			tsBuf[cur++] = (pcr >> 17) & 0xff;
+			tsBuf[cur++] = (pcr >> 9) & 0xff;
+			tsBuf[cur++] = (pcr >> 1) & 0xff;
+
+			tsBuf[cur] = (pcr << 7) & 0x80;
+			tsBuf[cur] |= (pcrExt >> 8) & 0x01;
+			cur++;
+			tsBuf[cur++] = pcrExt & 0xff;
 			cur += padSize;
 		}
 		else if (!addPCR&&padSize > 0)
@@ -525,18 +543,29 @@ void tsCreater::addTSFrame(const DataPacket & data, unsigned int timeMS, flvPack
 
 				//!四字节头
 				//PCR
-				long long pcr = ((timeMS*(PCR_HZ / 1000)) / 300) % 0x200000000;
+				long long pcr = ((timeMS*(PCR_HZ / 1000)) / 300) % 0x1ffffffff;
+				auto pcrExt = timeMS*(PCR_HZ / 1000);
 				if (addPCR)
 				{
 					int adpLength = 7;//包括pad和adapation field length
 					tsBuf[cur++] = adpLength;
 					tsBuf[cur++] = 0x10;//PCR flag
-					tsBuf[cur++] = ((pcr & 0xfe000000) >> 25);
+					/*tsBuf[cur++] = ((pcr & 0xfe000000) >> 25);
 					tsBuf[cur++] = ((pcr & 0x1fe0000) >> 17);
 					tsBuf[cur++] = ((pcr & 0x1fe00) >> 9);
 					tsBuf[cur++] = ((pcr & 0x1fe) >> 1);
 					tsBuf[cur++] = (((pcr & 1) << 7) | 0x7e);
-					tsBuf[cur++] = 0;
+					tsBuf[cur++] = 0;*/
+
+					tsBuf[cur++] = (pcr >> 25) & 0xff;
+					tsBuf[cur++] = (pcr >> 17) & 0xff;
+					tsBuf[cur++] = (pcr >> 9) & 0xff;
+					tsBuf[cur++] = (pcr >> 1) & 0xff;
+
+					tsBuf[cur] = (pcr << 7) & 0x80;
+					tsBuf[cur] |= (pcrExt >> 8) & 0x01;
+					cur++;
+					tsBuf[cur++] = pcrExt & 0xff;
 				}
 				//!PCR
 
@@ -944,4 +973,205 @@ void tsCreater::AddPatPmt() {
 		LOGE("add PAT failed");
 		return;
 	}
+}
+
+bool tsCreater::videoPayload(const DataPacket data, DataPacket & payload)
+{
+	//视频，第一个字节给类型，然后可能是AVC，可能是4字节大小+数据
+	if (data.data[0] == 0x17 && 0 == data.data[1])
+	{
+		//AVC 提取SPS PPS 
+		parseAVC(data);
+		return false;
+	}
+	else
+	{
+		//可能有多个帧，需要提取
+		int nalCur = 5;
+		DataPacket *nal;
+		std::list<DataPacket*> nalList;
+		auto getKeyframe = false;
+		while (nalCur<data.size)
+		{
+			unsigned int nalSize = 0;
+			unsigned char *ptrSize = (unsigned char*)(data.data + nalCur);
+			unsigned char sizeArray[4];
+			sizeArray[0] = ptrSize[0];
+			sizeArray[1] = ptrSize[1];
+			sizeArray[2] = ptrSize[2];
+			sizeArray[3] = ptrSize[3];
+			nalSize = (ptrSize[0] << 24) | (ptrSize[1] << 16) |
+				(ptrSize[2] << 8) | (ptrSize[3] << 0);
+			nalCur += 4;
+			int nalType = data.data[nalCur] & 0x1f;
+			DataPacket *tmpPkt = nullptr;
+			switch (nalType)
+			{
+			case 6://sei
+				if (this->m_sei.data!=nullptr)
+				{
+					delete []this->m_sei.data;
+					this->m_sei.data = nullptr;
+				}
+				m_sei.size = nalSize;
+				m_sei.data = new char[nalSize];
+				memcpy(m_sei.data, data.data + nalCur, nalSize);
+				break;
+			case 7://sps
+				if (this->m_sps.data != nullptr)
+				{
+					delete[]this->m_sps.data;
+					this->m_sps.data = nullptr;
+				}
+				m_sps.size = nalSize;
+				m_sps.data = new char[nalSize];
+				memcpy(m_sps.data, data.data + nalCur, nalSize);
+				break;
+			case 8://pps
+				if (this->m_pps.data != nullptr)
+				{
+					delete[]this->m_pps.data;
+					this->m_pps.data = nullptr;
+				}
+				m_pps.size = nalSize;
+				m_pps.data = new char[nalSize];
+				memcpy(m_pps.data, data.data + nalCur, nalSize);
+				break;
+			case 5://idr
+				//not break
+				getKeyframe = true;
+				this->keyFrameWrited = true;
+			default:
+				nal = new DataPacket;
+				nal->size = nalSize;
+				nal->data = new char[nalSize];
+				memcpy(nal->data, data.data + nalCur, nalSize);
+				nalList.push_back(nal);
+				break;
+			}
+			nalCur += nalSize;
+		}
+		if (this->keyFrameWrited==false&&getKeyframe==false)
+		{
+			for (auto i:nalList)
+			{
+				delete []i->data;
+				delete i;
+			}
+			nalList.clear();
+			return false;
+		}
+		if (getKeyframe)
+		{
+			//有关键帧 ，前面加sps pps sei
+			auto totalSize = 6;
+			for (auto i:nalList)
+			{
+				totalSize += 4 + i->size;
+			}
+			payload.size = totalSize;
+			if (m_sps.size>0)
+			{
+				payload.size += m_sps.size + 4;
+			}
+			if (m_pps.size>0)
+			{
+				payload.size += m_pps.size + 4;
+			}
+			if (m_sei.size > 0) {
+				payload.size += m_sei.size + 4;
+			}
+			payload.data = new char[payload.size];
+			auto tmp32 = 0;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x01;
+			payload.data[tmp32++] = 0x09;
+			payload.data[tmp32++] = 0x10;
+
+			if (m_sps.data)
+			{
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x01;
+				memcpy(payload.data + tmp32, m_sps.data, m_sps.size);
+				tmp32 += m_sps.size ;
+
+			}
+			if (m_pps.data)
+			{
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x01;
+				memcpy(payload.data + tmp32, m_pps.data, m_pps.size);
+				tmp32 += m_pps.size;
+			}
+
+			if (m_sei.data)
+			{
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x01;
+				memcpy(payload.data + tmp32, m_sei.data, m_sei.size);
+				tmp32 += m_sei.size;
+			}
+
+			for (auto i:nalList)
+			{
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x01;
+				memcpy(payload.data + tmp32, i->data, i->size);
+				tmp32 += i->size;
+			}
+				
+			for (auto i : nalList)
+			{
+				delete[]i->data;
+				delete i;
+			}
+			nalList.clear();
+		}
+		else {
+			auto totalSize = 6;
+			for (auto i : nalList)
+			{
+				totalSize += 4 + i->size;
+			}
+			payload.size = totalSize;
+			payload.data = new char[payload.size];
+			auto tmp32 = 0;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x00;
+			payload.data[tmp32++] = 0x01;
+			payload.data[tmp32++] = 0x09;
+			payload.data[tmp32++] = 0x10;
+
+			for (auto i : nalList)
+			{
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x00;
+				payload.data[tmp32++] = 0x01;
+				memcpy(payload.data + tmp32, i->data, i->size);
+				tmp32 += i->size;
+			}
+
+			for (auto i : nalList)
+			{
+				delete[]i->data;
+				delete i;
+			}
+			nalList.clear();
+		}
+		
+	}
+
+	return true;
 }

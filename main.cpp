@@ -4,7 +4,7 @@
 #include "aac.h"
 
 int main(char argc, char **argv) {
-	std::string srcName = "aac.flv";
+	std::string srcName = "hk.flv";
 	tsCreater tser("aac.ts");
 	tser.InitCRC32Table();
 	flvParser reader(srcName);
@@ -18,8 +18,11 @@ int main(char argc, char **argv) {
 		{
 			break;
 		}
-		if (pkt.packetType==flv_pkt_video||
-			flv_pkt_audio==pkt.packetType)
+		if (pkt.packetType==flv_pkt_video)
+		{
+			tser.addTimedPacket(pkt);
+		}
+		if (flv_pkt_audio==pkt.packetType)
 		{
 			tser.addTimedPacket(pkt);
 		}

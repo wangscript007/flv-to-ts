@@ -23,6 +23,8 @@ private:
 	void parseAVC(DataPacket data);
 	//已有音视频头，添加pat pmt
 	void AddPatPmt();
+	//生成视频payload
+	bool videoPayload(const DataPacket data, DataPacket &payload);
 private:
 	std::string m_name;
 	bool m_saveToDisk;
@@ -33,6 +35,7 @@ private:
 	static const int PCR_HZ;
 	static unsigned int CRC32Table[256];
 	static bool crc32Inited;
+	bool keyFrameWrited;
 	short m_pcrTimes;
 	short m_tsVcounts;//视频ts包计数器
 	short m_tsAcounts;//音频ts包计数器
